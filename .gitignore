@@ -6,3 +6,8 @@ settings.json
 # transcriptions of music somebody else owns.
 songs/*.txt
 !songs/demo.txt
+
+# PyInstaller build output
+build/
+dist/
+*.spec
