@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+settings.json
+
+# Sheets saved from the Letters window stay local; most of them are
+# transcriptions of music somebody else owns.
+songs/*.txt
+!songs/demo.txt
