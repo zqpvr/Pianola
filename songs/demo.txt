@@ -1,0 +1,26 @@
+// Demo sheet in Virtual Piano notation - every symbol the player understands.
+// Suggested tempo: 120 bpm, 2 slots per beat.  Lines starting with // are ignored.
+
+// Letters written together are a fast run, one note slot each.
+tyui opas
+
+// A space is a short pause, so these are half the speed of the run above.
+t y u i o p a s
+
+// A pipe is a longer pause, worth two slots.  Combine them for longer gaps:
+// "t|y" pauses, "t| y" longer, "t | y" longer still, "t| |y" longest.
+t|y t| y t | y t| |y
+
+// Square brackets play notes together.
+[tos] [yph] [uad] [ios]
+
+// A bracket written with spaces inside is the "as fast as possible" run,
+// which comes out as a quick roll rather than one strike.
+[t o s] [y p h]
+
+// Capitals are the black keys: T is C#, Y is D#, I is F#, O is G#, P is A#.
+t T y Y u i I o O p P a
+
+// A blank line is an extended pause.
+
+[tos] y u i | [yph] o p a
