@@ -4,12 +4,25 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass, field, fields
 
 from .arrange import ArrangeConfig
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           "settings.json")
+
+def app_dir() -> str:
+    """The folder the application lives in.
+
+    A PyInstaller build unpacks itself into a temporary directory that is
+    deleted again on exit, so anything meant to persist has to sit beside the
+    executable rather than beside this module.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+CONFIG_PATH = os.path.join(app_dir(), "settings.json")
 
 
 @dataclass

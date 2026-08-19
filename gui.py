@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from piano import keymap
 from piano.arrange import ArrangeConfig, arrange
-from piano.config import Settings
+from piano.config import Settings, app_dir
 from piano.hotkeys import HotkeyManager
 from piano.keyboard import Keyboard
 from piano.midi import MidiError, MidiSong, read_midi
@@ -190,7 +190,7 @@ class SheetWindow(tk.Toplevel):
         if not text:
             return
         name = "".join(c for c in self.name_var.get().strip() if c not in '\\/:*?"<>|')
-        folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "songs")
+        folder = os.path.join(app_dir(), "songs")
         os.makedirs(folder, exist_ok=True)
         path = os.path.join(folder, f"{name or 'sheet'}.txt")
         try:
@@ -271,7 +271,7 @@ class App:
 
     def _autoload(self) -> None:
         """Pick up anything sitting in the songs folder next to the app."""
-        folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "songs")
+        folder = os.path.join(app_dir(), "songs")
         if not os.path.isdir(folder):
             return
         found = [os.path.join(folder, name) for name in sorted(os.listdir(folder))
