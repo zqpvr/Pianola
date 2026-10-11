@@ -1,10 +1,9 @@
-"""Linux backend: a ``/dev/uinput`` virtual keyboard, evdev hotkeys, and a
-best-effort foreground window title.
+"""Linux backend: a ``/dev/uinput`` virtual keyboard and the focused window's title.
 
 Typing goes through the kernel rather than any display server, so it behaves the
 same on X11 and Wayland and reaches Wine, Proton and native games alike.  The
-price is permissions: ``/dev/uinput`` has to be writable by you, and the hotkeys
-read ``/dev/input/event*``, which normally means being in the ``input`` group.
+price is a permission: ``/dev/uinput`` has to be writable by you.  The hotkeys
+live in ``_linux_hotkeys``.
 
 The rest of the package identifies keys by Windows virtual-key code, so this
 module translates those to evdev codes at the edge.
@@ -17,13 +16,14 @@ import fcntl
 import json
 import logging
 import os
-import select
-import shutil
+import socket
 import struct
-import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
+
+from . import _dbus, _x11
 
 log = logging.getLogger(__name__)
 
@@ -152,27 +152,55 @@ def describe() -> str:
     session = ", ".join(f"{k}={env[k]}" for k in
                         ("XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "WAYLAND_DISPLAY", "DISPLAY")
                         if k in env)
-    probe = _probe.__name__.removeprefix("_title_") if _probe else "none, guard off"
-    return f"Linux uinput; focus probe: {probe}; {session or 'no session variables'}"
+    return f"Linux uinput; focus: {_focus_kind() or 'none, guard off'}; {session or 'no session variables'}"
 
 
 # -- focus -------------------------------------------------------------------
-_failures: dict[str, str] = {}
+#
+# Wayland has no portable way to ask which window has focus, so each desktop
+# that offers one gets its own source: KWin runs a small script that reports
+# every change, Hyprland, Sway and niri answer on their IPC sockets, and any
+# X11 session answers through the EWMH root properties.  GNOME on Wayland, and
+# compositors without an IPC, have nothing to ask, and the guard is off there.
+
+def _recv_all(sock: socket.socket) -> bytes:
+    chunks = []
+    while chunk := sock.recv(65536):
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
-def _run(*cmd: str) -> str | None:
+def _recv_exact(sock: socket.socket, n: int) -> bytes:
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("socket closed mid-reply")
+        data += chunk
+    return data
+
+
+def _ipc(path: str) -> socket.socket:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(1.0)
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=1.0)
-        failure = f"exit {out.returncode}: {out.stderr.strip()[:200]}" if out.returncode else ""
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        out, failure = None, str(exc)
-    if failure != _failures.get(cmd[0], ""):       # log changes, not every poll
-        _failures[cmd[0]] = failure
-        if failure:
-            log.warning("%s failed: %s", cmd[0], failure)
-        else:
-            log.info("%s working again", cmd[0])
-    return None if failure or out is None else out.stdout
+        sock.connect(path)
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
+def _title_hyprland() -> str:
+    signature = os.environ["HYPRLAND_INSTANCE_SIGNATURE"]
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    path = f"{runtime}/hypr/{signature}/.socket.sock"
+    if not os.path.exists(path):
+        path = f"/tmp/hypr/{signature}/.socket.sock"   # Hyprland before 0.40
+    with _ipc(path) as sock:
+        sock.sendall(b"j/activewindow")
+        info = json.loads(_recv_all(sock) or b"{}")
+    return info.get("title", "") if isinstance(info, dict) else ""
 
 
 def _sway_focused(node: dict) -> str | None:
@@ -185,65 +213,52 @@ def _sway_focused(node: dict) -> str | None:
     return None
 
 
-def _title_hyprland() -> str | None:
-    out = _run("hyprctl", "-j", "activewindow")
-    return json.loads(out).get("title", "") if out and out.strip() else None
+def _title_sway() -> str:
+    with _ipc(os.environ["SWAYSOCK"]) as sock:
+        sock.sendall(b"i3-ipc" + struct.pack("=II", 0, 4))          # GET_TREE
+        length, _kind = struct.unpack("=II", _recv_exact(sock, 14)[6:])
+        tree = json.loads(_recv_exact(sock, length))
+    return _sway_focused(tree) or ""
 
 
-def _title_sway() -> str | None:
-    out = _run("swaymsg", "-t", "get_tree")
-    return _sway_focused(json.loads(out)) if out else None
+def _title_niri() -> str:
+    with _ipc(os.environ["NIRI_SOCKET"]) as sock:
+        sock.sendall(b'"FocusedWindow"\n')
+        reply = json.loads(_recv_all(sock).split(b"\n", 1)[0])
+    if "Ok" not in reply:
+        raise ValueError(f"niri refused: {reply.get('Err')}")
+    window = reply["Ok"].get("FocusedWindow") or {}
+    return window.get("title") or ""
 
 
-def _title_kdotool() -> str | None:
-    out = _run("kdotool", "getactivewindow", "getwindowname")
-    return out.strip() if out is not None else None
+_x11_display: _x11.Display | None = None
 
 
-def _title_xdotool() -> str | None:
-    out = _run("xdotool", "getactivewindow", "getwindowname")
-    return out.strip() if out is not None else None
-
-
-def _focus_probe() -> Callable[[], str | None] | None:
-    """Pick the tool that can see the focused window in this session.
-
-    Wayland has no portable way to ask, so this goes by the desktop actually
-    running rather than by which tools happen to be installed: a probe aimed at
-    the wrong compositor fails every time, and a failing probe keeps the guard
-    closed.  ``xdotool`` only counts on X11, where it sees every window; under
-    Wayland it would report a stale XWayland window.
-    """
-    env = os.environ
-    wayland = env.get("XDG_SESSION_TYPE") == "wayland" or "WAYLAND_DISPLAY" in env
-    candidates: list[tuple[str, Callable[[], str | None]]] = []
-    if env.get("HYPRLAND_INSTANCE_SIGNATURE"):
-        candidates.append(("hyprctl", _title_hyprland))
-    if env.get("SWAYSOCK"):
-        candidates.append(("swaymsg", _title_sway))
-    if "KDE" in env.get("XDG_CURRENT_DESKTOP", "").upper():
-        candidates.append(("kdotool", _title_kdotool))
-    if not wayland and env.get("DISPLAY"):
-        candidates.append(("xdotool", _title_xdotool))
-    for tool, probe in candidates:
-        if shutil.which(tool):
-            return probe
-    return None
+def _title_x11() -> str:
+    global _x11_display
+    if _x11_display is None:
+        _x11_display = _x11.Display()
+    try:
+        return _x11_display.active_window_title()
+    except (OSError, _x11.X11Error):
+        _x11_display.close()
+        _x11_display = None                   # reconnect on the next poll
+        raise
 
 
 class _FocusWatcher:
-    """Polls the focused window's title on its own thread.
+    """Polls a focus source on its own thread.
 
-    Every answer costs a process and sometimes a D-Bus round trip, which the
-    scheduler cannot afford mid-song, so it only ever reads the last answer.
-    Polling stops a couple of seconds after the last question and resumes on the
-    next one, which then waits for a fresh answer rather than trusting a stale one.
+    Even a quick socket round trip is more than the scheduler should spend
+    mid-song, so it only ever reads the last answer.  Polling stops a couple of
+    seconds after the last question and resumes on the next one, which then
+    waits for a fresh answer rather than trusting a stale one.
     """
 
-    POLL = 0.2
+    POLL = 0.1
     IDLE = 2.0
 
-    def __init__(self, probe: Callable[[], str | None]):
+    def __init__(self, probe: Callable[[], str]):
         self._probe = probe
         self._title = ""
         self._asked = 0.0
@@ -265,13 +280,18 @@ class _FocusWatcher:
         return self._title
 
     def _poll(self) -> None:
+        failure = ""
         while True:
             try:
                 title = self._probe()
-            except Exception:                 # malformed output must not kill the watcher
-                log.exception("focus probe crashed")
-                title = None
-            title = title or ""               # a failed probe keeps the guard closed
+                if failure:
+                    log.info("focus source working again")
+                    failure = ""
+            except Exception as exc:         # a failed check keeps the guard closed
+                if str(exc) != failure:
+                    failure = str(exc)
+                    log.warning("focus check failed: %s", exc)
+                title = ""
             if title != self._title:
                 log.info("focused window: %r", title)
             self._title = title
@@ -284,13 +304,160 @@ class _FocusWatcher:
                     return
 
 
-_probe = _focus_probe()
-_watcher = _FocusWatcher(_probe) if _probe else None
+_KWIN_SCRIPT = """\
+var service = %s;
+var current = null;
+function report() {
+    callDBus(service, "/Pianola", "io.github.zqpvr.Pianola", "Focus",
+             current ? String(current.caption || "") : "");
+}
+function activated(window) {
+    if (current) {
+        try { current.captionChanged.disconnect(report); } catch (e) {}
+    }
+    current = window;
+    if (current) current.captionChanged.connect(report);
+    report();
+}
+if (workspace.windowActivated) {            // Plasma 6
+    workspace.windowActivated.connect(activated);
+    activated(workspace.activeWindow);
+} else {                                    // Plasma 5
+    workspace.clientActivated.connect(activated);
+    activated(workspace.activeClient);
+}
+"""
+
+
+class _KWinFocus:
+    """Loads a KWin script that calls back over D-Bus whenever focus moves.
+
+    Push rather than poll, so the answer is always current.  The script stays
+    loaded until Pianola exits; a leftover from a run that crashed is unloaded
+    by name before the new one goes in.
+    """
+
+    PLUGIN = "pianola-focus"
+    SCRIPTING = ("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting")
+
+    def __init__(self):
+        self._title = ""
+        self._ready = threading.Event()
+        self._lock = threading.Lock()
+        self._bus: _dbus.Bus | None = None
+        self._path = ""
+        self._failed = False
+
+    def title(self) -> str | None:
+        with self._lock:
+            if self._failed:
+                return None
+            if self._bus is None or self._bus.closed.is_set():
+                try:
+                    self._start()
+                except (OSError, _dbus.DBusError) as exc:
+                    log.warning("KWin focus script unavailable: %s", exc)
+                    self._failed = True
+                    return None
+        self._ready.wait(timeout=1.5)
+        return self._title
+
+    def _start(self) -> None:
+        bus = _dbus.Bus()
+        try:
+            bus.export("/Pianola", "Focus", self._report)
+            fd, path = tempfile.mkstemp(prefix="pianola-kwin-", suffix=".js",
+                                        dir=os.environ.get("XDG_RUNTIME_DIR"))
+            with os.fdopen(fd, "w") as fh:
+                fh.write(_KWIN_SCRIPT % json.dumps(bus.unique_name))
+            try:
+                bus.call(*self.SCRIPTING, "unloadScript", "s", [self.PLUGIN])
+            except _dbus.DBusError:
+                pass
+            script_id = bus.call(*self.SCRIPTING, "loadScript", "ss", [path, self.PLUGIN])[0]
+            if script_id < 0:
+                raise _dbus.DBusError("org.kde.kwin.Scripting", "loadScript refused the script")
+            bus.call(*self.SCRIPTING, "start")
+        except BaseException:
+            bus.close()
+            raise
+        self._bus, self._path = bus, path
+        atexit.register(self.close)
+        log.info("KWin focus script loaded")
+
+    def _report(self, caption: str) -> None:
+        if caption != self._title:
+            log.info("focused window: %r", caption)
+        self._title = caption
+        self._ready.set()
+
+    def close(self) -> None:
+        if self._bus is not None:
+            try:
+                self._bus.call(*self.SCRIPTING, "unloadScript", "s", [self.PLUGIN], timeout=2.0)
+            except _dbus.DBusError:
+                pass
+            self._bus.close()
+            self._bus = None
+        if self._path:
+            try:
+                os.unlink(self._path)
+            except OSError:
+                pass
+
+
+def _wayland() -> bool:
+    return os.environ.get("XDG_SESSION_TYPE") == "wayland" or "WAYLAND_DISPLAY" in os.environ
+
+
+def _focus_kind() -> str | None:
+    """Which focus source this session has, judged from the environment alone."""
+    env = os.environ
+    if env.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return "hyprland"
+    if env.get("SWAYSOCK"):
+        return "sway"
+    if env.get("NIRI_SOCKET"):
+        return "niri"
+    if _wayland():
+        return "kwin" if "KDE" in env.get("XDG_CURRENT_DESKTOP", "").upper() else None
+    return "x11" if env.get("DISPLAY") else None
+
+
+def _focus_source():
+    kind = _focus_kind()
+    if kind == "kwin":
+        return _KWinFocus()
+    if kind == "x11":
+        try:
+            display = _x11.Display()
+            supported = display.supports_active_window()
+            display.close()
+        except (OSError, _x11.X11Error) as exc:
+            log.warning("X11 focus check unavailable: %s", exc)
+            return None
+        if not supported:
+            log.warning("the window manager does not publish _NET_ACTIVE_WINDOW")
+            return None
+    probes = {"hyprland": _title_hyprland, "sway": _title_sway, "niri": _title_niri,
+              "x11": _title_x11}
+    return _FocusWatcher(probes[kind]) if kind else None
+
+
+_source = None
+_source_ready = False
+_source_lock = threading.Lock()
 
 
 def foreground_title() -> str | None:
     """Title of the focused window, or ``None`` when this session cannot say."""
-    return _watcher.title() if _watcher else None
+    global _source, _source_ready
+    if not _source_ready:
+        with _source_lock:
+            if not _source_ready:
+                _source = _focus_source()
+                _source_ready = True
+    return _source.title() if _source else None
 
 
 class TimerResolution:
@@ -304,147 +471,3 @@ class TimerResolution:
 
     def __exit__(self, *exc):
         return False
-
-
-# -- hotkeys -----------------------------------------------------------------
-_MOD_KEYS = {
-    KEY_LEFTCTRL: "ctrl", KEY_RIGHTCTRL: "ctrl",
-    KEY_LEFTSHIFT: "shift", KEY_RIGHTSHIFT: "shift",
-    KEY_LEFTALT: "alt", KEY_RIGHTALT: "alt",
-}
-
-_NAMED_KEYS = {f"f{i}": KEY_F1 + i - 1 for i in range(1, 11)}
-_NAMED_KEYS.update({"f11": 87, "f12": 88, "escape": 1, "space": 57, "home": 102,
-                    "end": 107, "left": 105, "right": 106, "up": 103, "down": 108,
-                    "insert": 110, "delete": 111, "pause": 119})
-
-
-def parse_hotkey(text: str) -> tuple[frozenset[str], int]:
-    """'ctrl+shift+f1' -> ({'ctrl', 'shift'}, evdev code)."""
-    mods: set[str] = set()
-    key = 0
-    for part in text.lower().replace(" ", "").split("+"):
-        if part in ("ctrl", "control"):
-            mods.add("ctrl")
-        elif part in ("alt", "shift"):
-            mods.add(part)
-        elif part in _NAMED_KEYS:
-            key = _NAMED_KEYS[part]
-        elif len(part) == 1 and part in _ROW_KEYS:
-            key = _ROW_KEYS[part]
-    if not key:
-        raise ValueError(f"unrecognised hotkey: {text!r}")
-    return frozenset(mods), key
-
-
-def _keyboards() -> list[int]:
-    """Open every evdev node that looks like a real keyboard (has F1)."""
-    fds = []
-    try:
-        names = sorted(n for n in os.listdir("/dev/input") if n.startswith("event"))
-    except OSError:
-        return fds
-    length = 96                              # bytes covering KEY_MAX bits
-    for name in names:
-        try:
-            fd = os.open(f"/dev/input/{name}", os.O_RDONLY | os.O_NONBLOCK)
-        except OSError:
-            continue
-        try:
-            caps = bytearray(length)
-            fcntl.ioctl(fd, _eviocgbit(EV_KEY, length), caps)
-            if caps[KEY_F1 // 8] & (1 << (KEY_F1 % 8)):
-                label = bytearray(256)
-                fcntl.ioctl(fd, EVIOCGNAME, label)
-                log.info("hotkeys: watching %s (%s)", name,
-                         label.split(b"\0")[0].decode(errors="replace"))
-                fds.append(fd)
-                continue
-        except OSError:
-            pass
-        os.close(fd)
-    return fds
-
-
-class HotkeyManager:
-    """Watches the keyboards for the transport keys.
-
-    Unlike ``RegisterHotKey`` this only observes: the game still receives F1 and
-    friends.  Nothing here grabs the device, so typing is never intercepted.
-    """
-
-    def __init__(self):
-        self._pending: list[tuple[str, Callable[[], None]]] = []
-        self._thread: threading.Thread | None = None
-        self._wake_w = -1
-        self.failed: list[str] = []
-        self.reason = ""
-
-    def bind(self, combo: str, action: Callable[[], None]) -> None:
-        self._pending.append((combo, action))
-
-    def start(self) -> None:
-        if self._thread:
-            return
-        self.failed, self.reason = [], ""
-        bindings: dict[tuple[frozenset[str], int], tuple[str, Callable[[], None]]] = {}
-        for combo, action in self._pending:
-            try:
-                bindings[parse_hotkey(combo)] = (combo, action)
-            except ValueError:
-                self.failed.append(combo)
-        fds = _keyboards()
-        if not fds:
-            self.failed.extend(c for c, _ in self._pending if c not in self.failed)
-            self.reason = ("no readable keyboard in /dev/input; add yourself to the "
-                           "'input' group and log in again to enable hotkeys")
-            log.warning("hotkeys off: %s", self.reason)
-            return
-        wake_r, self._wake_w = os.pipe()
-        self._thread = threading.Thread(target=self._pump, args=(wake_r, fds, bindings),
-                                        name="piano-hotkeys", daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        if self._thread:
-            os.close(self._wake_w)            # EOF on the pipe wakes the pump
-            self._wake_w = -1
-            self._thread.join(timeout=1.0)
-        self._thread = None
-
-    def _pump(self, wake_r: int, fds: list[int], bindings) -> None:
-        held: set[str] = set()
-        try:
-            while True:
-                ready, _, _ = select.select([wake_r, *fds], [], [])
-                if wake_r in ready:
-                    return
-                for fd in ready:
-                    try:
-                        data = os.read(fd, _EVENT.size * 64)
-                    except BlockingIOError:
-                        continue
-                    except OSError:
-                        fds.remove(fd)        # unplugged
-                        os.close(fd)
-                        continue
-                    for off in range(0, len(data) - _EVENT.size + 1, _EVENT.size):
-                        _, _, etype, code, value = _EVENT.unpack_from(data, off)
-                        if etype != EV_KEY:
-                            continue
-                        mod = _MOD_KEYS.get(code)
-                        if mod:
-                            # several physical keys can map to one modifier name
-                            (held.add if value else held.discard)(f"{mod}:{code}")
-                        elif value == 1:
-                            mods = frozenset(m.split(":")[0] for m in held)
-                            binding = bindings.get((mods, code))
-                            if binding:
-                                log.info("hotkey %s", binding[0])
-                                try:
-                                    binding[1]()
-                                except Exception:   # a bad callback must not kill the pump
-                                    log.exception("hotkey %s failed", binding[0])
-        finally:
-            for fd in (wake_r, *fds):
-                os.close(fd)

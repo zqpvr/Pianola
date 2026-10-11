@@ -15,7 +15,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from piano import keymap
 from piano.arrange import ArrangeConfig, arrange
-from piano.config import Settings, app_dir
+from piano.config import DEFAULT_WINDOW, WINDOW_PRESETS, Settings, data_dir
 from piano.hotkeys import HotkeyManager
 from piano.keyboard import Keyboard
 from piano.midi import MidiError, MidiSong, read_midi
@@ -78,7 +78,7 @@ class SheetWindow(tk.Toplevel):
         self.name_var = tk.StringVar(value="pasted sheet")
         ttk.Entry(top, textvariable=self.name_var, width=28).pack(side="left", padx=(6, 14))
         ttk.Label(top, text="Tempo").pack(side="left")
-        self.bpm_var = tk.IntVar(value=int(app.vars["sheet_bpm"].get()))
+        self.bpm_var = tk.IntVar(value=int(app._num("sheet_bpm", 120)))
         ttk.Spinbox(top, from_=20, to=400, textvariable=self.bpm_var, width=6,
                     command=self._schedule).pack(side="left", padx=6)
         ttk.Label(top, text="bpm", style="Muted.TLabel").pack(side="left")
@@ -117,6 +117,14 @@ class SheetWindow(tk.Toplevel):
         self.text.focus_set()
 
     # -- content ----------------------------------------------------------
+    @property
+    def bpm(self) -> int:
+        """The tempo box, or the main window's sheet tempo while it holds no number."""
+        try:
+            return max(int(self.bpm_var.get()), 1)
+        except (tk.TclError, ValueError):
+            return max(int(self.app._num("sheet_bpm", 120)), 1)
+
     @property
     def content(self) -> str:
         return self.text.get("1.0", "end").strip()
@@ -158,7 +166,7 @@ class SheetWindow(tk.Toplevel):
             return
         cfg = self.app._collect()
         cfg.humanize = 0.0          # a rolled chord would only blur the grid
-        bpm = self.bpm_var.get() or int(self.app.song.base_bpm)
+        bpm = self.bpm or int(self.app.song.base_bpm)
         self.bpm_var.set(bpm)
         self.name_var.set(self.app.song.title or "song")
         self.set_content(to_sheet(arrange(self.app.song, cfg), bpm, self.app.sheet_units))
@@ -176,10 +184,9 @@ class SheetWindow(tk.Toplevel):
             self.report_var.set("Nothing here yet.")
             return
         notes, unknown = sheet_report(text)
-        song = parse_sheet(text, bpm=max(self.bpm_var.get(), 1),
-                           units_per_beat=self.app.sheet_units)
+        song = parse_sheet(text, bpm=self.bpm, units_per_beat=self.app.sheet_units)
         m, s = divmod(int(song.duration), 60)
-        message = f"{notes} notes, about {m}:{s:02d} at {self.bpm_var.get()} bpm"
+        message = f"{notes} notes, about {m}:{s:02d} at {self.bpm} bpm"
         if unknown:
             shown = " ".join(unknown[:12])
             message += f"   -   ignoring {len(unknown)} unplayable characters: {shown}"
@@ -191,7 +198,7 @@ class SheetWindow(tk.Toplevel):
         if not text:
             self.report_var.set("Nothing to load.")
             return False
-        bpm = max(self.bpm_var.get(), 1)
+        bpm = self.bpm
         song = parse_sheet(text, bpm=bpm, title=self.name_var.get().strip() or "pasted sheet",
                            units_per_beat=self.app.sheet_units)
         if not song.notes:
@@ -208,17 +215,17 @@ class SheetWindow(tk.Toplevel):
         if not text:
             return
         name = "".join(c for c in self.name_var.get().strip() if c not in '\\/:*?"<>|')
-        folder = os.path.join(app_dir(), "songs")
-        os.makedirs(folder, exist_ok=True)
+        folder = os.path.join(data_dir(), "songs")
         path = os.path.join(folder, f"{name or 'sheet'}.txt")
         try:
+            os.makedirs(folder, exist_ok=True)
             with open(path, "w", encoding="utf-8") as fh:
-                fh.write(f"// {name}  -  {self.bpm_var.get()} bpm\n{text}\n")
+                fh.write(f"// {name}  -  {self.bpm} bpm\n{text}\n")
         except OSError as exc:
             messagebox.showerror("Could not save", str(exc))
             return
         self.app._add([path])
-        self.report_var.set(f"Saved to {os.path.join('songs', os.path.basename(path))}")
+        self.report_var.set(f"Saved to {path}")
 
     def close(self) -> None:
         if self._job:
@@ -286,7 +293,7 @@ class App:
 
     def _autoload(self) -> None:
         """Pick up anything sitting in the songs folder next to the app."""
-        folder = os.path.join(app_dir(), "songs")
+        folder = os.path.join(data_dir(), "songs")
         if not os.path.isdir(folder):
             return
         found = [os.path.join(folder, name) for name in sorted(os.listdir(folder))
@@ -465,11 +472,11 @@ class App:
         window = ttk.LabelFrame(parent, text=" Safety ", padding=8)
         window.pack(fill="x", pady=(8, 0))
         check(window, "focus_guard", "Only type into a window named", live=True).pack(anchor="w")
-        self.vars["focus_filter"] = tk.StringVar(value="Roblox")
-        # Editable: the presets cover Roblox and the browser tab title
+        self.vars["focus_filter"] = tk.StringVar(value=DEFAULT_WINDOW)
+        # Editable: the presets cover the Roblox client and the browser tab title
         # virtualpiano.net gives its sheet pages, but any title fragment works.
         combo = ttk.Combobox(window, textvariable=self.vars["focus_filter"],
-                             values=("Roblox", "Virtual Piano"))
+                             values=WINDOW_PRESETS)
         combo.pack(fill="x", pady=(2, 0))
         combo.bind("<<ComboboxSelected>>", lambda e: self._changed(True))
         combo.bind("<FocusOut>", lambda e: self._changed(True))
@@ -490,36 +497,47 @@ class App:
         self.vars["loop"].set(s.loop)
         self.vars["countdown"].set(s.countdown)
         self.vars["focus_guard"].set(bool(s.focus_filter))
-        self.vars["focus_filter"].set(s.focus_filter or "Roblox")
+        self.vars["focus_filter"].set(s.focus_filter or DEFAULT_WINDOW)
         self.vars["sheet_bpm"].set(s.sheet_bpm)
         self.vars["sheet_units"].set(s.sheet_units)
         self._on_rate()
         self.humanize_label.config(text=f"Humanise  {a.humanize * 100:.0f}%")
         self._changed(live=True)
 
+    def _num(self, key: str, fallback: float) -> float:
+        """A spinbox's value, or ``fallback`` while its text is not a number.
+
+        Spinboxes accept any typing, and an empty or half-typed box must not
+        break re-arranging, playing or, worst of all, closing the window.
+        """
+        try:
+            return float(self.vars[key].get())
+        except (tk.TclError, ValueError):
+            return fallback
+
     def _collect(self) -> ArrangeConfig:
         v = self.vars
         cfg = ArrangeConfig()
-        cfg.transpose = None if v["auto_transpose"].get() else int(v["transpose"].get())
+        cfg.transpose = None if v["auto_transpose"].get() else int(self._num("transpose", 0))
         cfg.octave_only = bool(v["octave_only"].get())
         cfg.fold_octaves = bool(v["fold_octaves"].get())
         cfg.drop_drums = bool(v["drop_drums"].get())
         cfg.sustain_pedal = bool(v["sustain_pedal"].get())
-        cfg.max_polyphony = max(1, int(v["max_polyphony"].get()))
-        cfg.chord_window_ms = float(v["chord_window_ms"].get())
-        cfg.min_note_ms = float(v["min_note_ms"].get())
-        cfg.min_gap_ms = float(v["min_gap_ms"].get())
-        cfg.humanize = float(v["humanize"].get())
+        cfg.max_polyphony = max(1, int(self._num("max_polyphony", cfg.max_polyphony)))
+        cfg.chord_window_ms = self._num("chord_window_ms", cfg.chord_window_ms)
+        cfg.min_note_ms = self._num("min_note_ms", cfg.min_note_ms)
+        cfg.min_gap_ms = self._num("min_gap_ms", cfg.min_gap_ms)
+        cfg.humanize = self._num("humanize", cfg.humanize)
         return cfg
 
     @property
     def sheet_units(self) -> float:
-        return max(1.0, float(self.vars["sheet_units"].get()))
+        return max(1.0, self._num("sheet_units", self.settings.sheet_units))
 
     def _push_live_settings(self) -> None:
-        self.player.rate = float(self.vars["rate"].get())
+        self.player.rate = self._num("rate", 1.0)
         self.player.loop = bool(self.vars["loop"].get())
-        self.player.countdown = float(self.vars["countdown"].get())
+        self.player.countdown = max(0.0, self._num("countdown", self.settings.countdown))
         guard = bool(self.vars["focus_guard"].get())
         self.player.focus_filter = self.vars["focus_filter"].get().strip() if guard else None
 
@@ -601,7 +619,7 @@ class App:
             if path.lower().endswith((".mid", ".midi")):
                 self.song = read_midi(path)
             else:
-                self.song = read_sheet_file(path, float(self.vars["sheet_bpm"].get()),
+                self.song = read_sheet_file(path, self._num("sheet_bpm", 120.0),
                                             units_per_beat=self.sheet_units)
         except (MidiError, OSError, ValueError) as exc:
             messagebox.showerror("Could not read that file", str(exc))
@@ -701,14 +719,15 @@ class App:
         for name, action in actions.items():
             combo = keys.get(name)
             if combo:
-                self.hotkeys.bind(combo, lambda a=action: self.root.after(0, a))
+                self.hotkeys.bind(combo, lambda a=action: self.root.after(0, a), name)
+        self.hotkeys.on_status = self.messages.put      # Linux reports from a worker thread
         self.hotkeys.start()
         if self.hotkeys.failed:
             why = getattr(self.hotkeys, "reason", "") or "already taken by another app"
             self.messages.put(f"Hotkeys unavailable ({why}): " + ", ".join(self.hotkeys.failed))
 
     def _nudge_rate(self, delta: float) -> None:
-        rate = min(3.0, max(0.25, float(self.vars["rate"].get()) + delta))
+        rate = min(3.0, max(0.25, self._num("rate", 1.0) + delta))
         self.vars["rate"].set(rate)
         self._on_rate()
 
@@ -792,12 +811,12 @@ class App:
         self.hotkeys.stop()
         s = self.settings
         s.arrange = self._collect()
-        s.rate = float(self.vars["rate"].get())
+        s.rate = self._num("rate", s.rate)
         s.loop = bool(self.vars["loop"].get())
-        s.countdown = float(self.vars["countdown"].get())
+        s.countdown = max(0.0, self._num("countdown", s.countdown))
         s.focus_filter = (self.vars["focus_filter"].get().strip()
                           if self.vars["focus_guard"].get() else "")
-        s.sheet_bpm = float(self.vars["sheet_bpm"].get())
+        s.sheet_bpm = self._num("sheet_bpm", s.sheet_bpm)
         s.sheet_units = self.sheet_units
         s.save()
         self.root.destroy()

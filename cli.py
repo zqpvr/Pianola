@@ -10,10 +10,10 @@ import sys
 import threading
 import time
 
-from piano import keymap
+from piano import __version__, keymap
 from piano.arrange import ArrangeConfig, arrange, best_transpose, score_transpose
-from piano.config import app_dir
-from piano.hotkeys import HotkeyManager
+from piano.config import DEFAULT_WINDOW, data_dir
+from piano.hotkeys import CONTROL_ACTIONS, HotkeyManager, send_control
 from piano.keyboard import Keyboard, describe
 from piano.midi import MidiError, read_midi
 from piano.player import Player
@@ -52,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="letter slots per beat (2 = eighths, the site's default)")
 
     p.add_argument("--countdown", type=float, default=3.0, help="seconds before the first note")
-    p.add_argument("--window", default="Roblox",
+    p.add_argument("--window", default=DEFAULT_WINDOW,
                    help="only type while a window with this in its title is focused")
     p.add_argument("--no-window-check", action="store_true")
     p.add_argument("--loop", action="store_true")
@@ -68,6 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keys", action="store_true", help="print the key map and exit")
     p.add_argument("--log", action="store_true",
                    help="log what the player does, to the terminal and pianola.log")
+    p.add_argument("--control", choices=CONTROL_ACTIONS, metavar="ACTION",
+                   help="send an action to the running player and exit (Linux): "
+                        + ", ".join(CONTROL_ACTIONS))
+    p.add_argument("--version", action="version", version=f"Pianola {__version__}")
     return p
 
 
@@ -133,13 +137,17 @@ def preview(arrangement, limit: int = 60) -> None:
 
 def setup_logging() -> None:
     """Debug log to stderr and to pianola.log beside the app, crashes included."""
-    path = os.path.join(app_dir(), "pianola.log")
+    path = os.path.join(data_dir(), "pianola.log")
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    try:
+        handlers.append(logging.FileHandler(path, mode="w", encoding="utf-8"))
+    except OSError as exc:
+        path = f"the terminal only ({exc})"
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s.%(msecs)03d %(threadName)-13s %(name)-14s %(message)s",
         datefmt="%H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stderr),
-                  logging.FileHandler(path, mode="w", encoding="utf-8")])
+        handlers=handlers)
     log = logging.getLogger("pianola")
     threading.excepthook = lambda a: log.error(
         "thread %s crashed", a.thread.name if a.thread else "?",
@@ -153,6 +161,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.log:
         setup_logging()
 
+    if args.control:
+        if sys.platform == "win32":
+            print("--control is for Linux; on Windows the hotkeys work in every window",
+                  file=sys.stderr)
+            return 2
+        if not send_control(args.control):
+            print("no running Pianola is listening", file=sys.stderr)
+            return 1
+        return 0
     if args.keys:
         print_keys()
         return 0
@@ -210,9 +227,10 @@ def main(argv: list[str] | None = None) -> int:
     player.on_progress = progress
 
     hotkeys = HotkeyManager()
-    hotkeys.bind("f1", player.toggle)
-    hotkeys.bind("f2", player.stop)
-    hotkeys.bind("f4", player.panic)
+    hotkeys.bind("f1", player.toggle, "play_pause")
+    hotkeys.bind("f2", player.stop, "stop")
+    hotkeys.bind("f4", player.panic, "panic")
+    hotkeys.on_status = lambda text: print(f"\n{text}", file=sys.stderr)
     hotkeys.start()
     if hotkeys.failed:
         why = getattr(hotkeys, "reason", "") or "already taken by another app"
