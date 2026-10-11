@@ -16,7 +16,9 @@ round-trip through Windows. Most auto players blast the raw note stream at the
 game and produce something that is recognisably the wrong song. This one arranges
 first.
 
-Pure Python, no third-party packages. `python main.py` (`./run.sh` on Linux) is the whole installation.
+Pure Python, no third-party packages. Download a single-file build for Windows
+or Linux from [Releases](https://github.com/zqpvr/Pianola/releases), or run from
+source: `python main.py` (`./run.sh` on Linux) is the whole installation.
 
 ## Features
 
@@ -36,8 +38,9 @@ Pure Python, no third-party packages. `python main.py` (`./run.sh` on Linux) is 
 
 ## Requirements
 
-Windows or Linux, and Python 3.10 or newer (with Tk for the window). Nothing else is needed: the MIDI parser,
-the arranger, the input backend and the scheduler are all in this repository.
+Windows or Linux. The release builds carry their own Python; from source you
+need Python 3.10 or newer with Tk. Nothing else is needed: the MIDI parser, the
+arranger, the input backends and the scheduler are all in this repository.
 
 Run Roblox unelevated, or Windows silently discards input from an unelevated
 sender.
@@ -49,26 +52,44 @@ key positions rather than characters.
 
 ## Linux
 
-Run `./run.sh` instead of `python main.py`; it takes the same arguments.
+Run the release binary (`chmod +x pianola-linux-x86_64` first), or `./run.sh`
+from source; both take the same arguments as `python main.py`. The Roblox client on Linux is
+[Sober](https://sober.vinegarhq.org/), so the window box defaults to **Sober**.
 
 Keystrokes are typed through `/dev/uinput`, a virtual keyboard created at the
-kernel level, so it works the same on X11 and Wayland and reaches Wine, Proton
-and native Roblox clients alike. Your user has to be able to write to it:
+kernel level, so it works the same on X11 and Wayland and reaches Sober, Wine
+and browsers alike. Your user has to be able to write to it:
 
 - Most distros: `sudo modprobe uinput`, then a udev rule such as
   `KERNEL=="uinput", GROUP="input", MODE="0660"` and add yourself to `input`.
 
-Two things are best-effort and degrade rather than fail:
+**Hotkeys** come from the first of these the session allows:
 
-- **Hotkeys** read `/dev/input/event*`, which needs the `input` group. Without it
-  the window buttons still work and the player says the hotkeys are unavailable.
-  They observe rather than grab, so the game also receives F1 and friends.
-- **The window guard** needs a way to ask the desktop for the focused window:
-  `hyprctl` on Hyprland, `swaymsg` on Sway, `kdotool` on KDE Plasma, or `xdotool`
-  on any X11 session. Without the one for your desktop the guard is off and keys
-  go to whatever has focus, so start playback with the right window in front.
-  With it, a failed check pauses rather than plays. Set the window box to match
-  your client's title (Sober's may not say "Roblox").
+| Source | Where | Notes |
+| --- | --- | --- |
+| The keyboards themselves | Anywhere | Needs the `input` group. Observes, so the game sees the F-keys too |
+| The desktop's shortcut portal | KDE Plasma, GNOME 48+, Hyprland on Wayland | The desktop asks once to approve. On Hyprland, bind them with the `global` dispatcher; `hyprctl globalshortcuts` lists their names |
+| An X11 key grab | Any X11 window manager | On Wayland it only catches keys while an XWayland window has focus |
+
+For the portal, Pianola writes a hidden desktop entry,
+`~/.local/share/applications/io.github.zqpvr.Pianola.desktop`, so the desktop
+files the shortcuts under Pianola rather than under whatever launched it.
+
+Anything else, Sway and the other wlroots compositors included, can bind keys in
+its own config to `pianola --control ACTION`, which reaches the running player
+whichever source is in use. The actions are `play_pause`, `stop`, `restart`,
+`panic`, `speed_down` and `speed_up`:
+
+```
+bindsym F1 exec /path/to/pianola --control play_pause
+```
+
+**The window guard** asks the desktop which window has focus: a small KWin script
+on KDE Plasma, the IPC socket on Hyprland, Sway and niri, and the window manager's
+EWMH properties on any X11 session. GNOME on Wayland, and compositors without an
+IPC, offer no way to ask, so there the guard is off and keys go to whatever has
+focus; start playback with the right window in front. Where it works, a failed
+check pauses rather than plays.
 
 ## Running it
 
@@ -102,13 +123,14 @@ The CLI covers the same ground:
 python main.py song.mid --speed 1.1 --polyphony 5 --humanize 0.3
 ```
 
-`--log` records what the player does (keystroke batches, focus changes, hotkeys,
-state, timing) to the terminal and to `pianola.log` beside the app, which is the
-thing to attach when something misbehaves. `--analyze` reports the song's range, what each transposition strategy would
+`--analyze` reports the song's range, what each transposition strategy would
 achieve, and what the arranger did, without playing. `--preview` prints the
 keystroke stream with timestamps, which is the fastest way to see whether a file
 arranged sensibly. `--keys` prints the layout. `--no-window-check` removes the
-focus guard, and `--loop` repeats.
+focus guard, and `--loop` repeats. `--log` records what the player does
+(keystroke batches, focus changes, hotkeys, state, timing) to the terminal and to
+`pianola.log`, which is the thing to attach when something misbehaves.
+`--control ACTION` drives a running player on Linux, as above.
 
 ## What the arranger does
 
@@ -206,11 +228,11 @@ pressed before accidentals so shift toggles at most once per chord.
 
 ## Notes
 
-Keys are delivered as scancodes through `SendInput`, the same path a physical
-keyboard takes. Nothing is injected into or read from the game. This is a program
+Keys are delivered as scancodes through `SendInput` on Windows and as a virtual
+keyboard on Linux, the same path a physical keyboard takes. Nothing is injected into or read from the game. This is a program
 that types, and it can only do what your fingers could do more slowly.
 
-Sticky Keys (Windows) will not trigger from the shift traffic, since that shortcut needs
+Sticky Keys will not trigger from the shift traffic, since that shortcut needs
 five consecutive shift presses with nothing in between, and there is always a
 note key between ours.
 
@@ -220,8 +242,10 @@ to the **Virtual Piano** preset, then click the on-screen piano once so the page
 has focus. The box is free text, so any other title fragment works for any other
 target.
 
-Settings persist to `settings.json` next to the application when the window
-closes.
+Settings persist to `settings.json` when the window closes, next to the
+application if that folder is writable, so a copy on a USB stick stays
+self-contained, and otherwise in `%APPDATA%\Pianola` or `~/.config/pianola`.
+Sheets saved from the Letters window and `pianola.log` go to the same place.
 
 ## Layout
 
@@ -235,11 +259,15 @@ piano/
   arrange.py      transposition, chord thinning, keyboard constraints
   keymap.py       the 61-key layout
   keyboard.py     key bookkeeping and shift handling
-  _win.py         SendInput, RegisterHotKey, window title, timer (Windows)
-  _linux.py       uinput, evdev hotkeys, window title (Linux)
   player.py       the scheduler and the virtual clock
   hotkeys.py      the transport keys
   config.py       settings.json
+  _win.py         SendInput, RegisterHotKey, window title, timer (Windows)
+  _linux.py       uinput, the focused window per desktop (Linux)
+  _linux_hotkeys.py  evdev, the shortcut portal, X11 grabs, --control (Linux)
+  _dbus.py        a small D-Bus client, for the portal and KWin
+  _x11.py         a small X11 protocol client, for EWMH and key grabs
+tests/            smoke tests, run by CI on Windows and Linux
 ```
 
 ## Licence

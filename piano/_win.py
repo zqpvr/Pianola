@@ -82,7 +82,11 @@ def describe() -> str:
 
 
 def enable_dpi_awareness() -> bool:
-    """Opt in to per-monitor DPI so Windows does not stretch the window bitmap."""
+    """Opt in to DPI awareness so Windows does not stretch the window bitmap.
+
+    System-aware (1) rather than per-monitor (2): Tk does not handle
+    WM_DPICHANGED, so per-monitor would leave it wrongly sized on a second screen.
+    """
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except (AttributeError, OSError):
@@ -185,7 +189,8 @@ class HotkeyManager:
         self._ready = threading.Event()
         self.failed: list[str] = []
 
-    def bind(self, combo: str, action: Callable[[], None]) -> None:
+    def bind(self, combo: str, action: Callable[[], None], name: str = "") -> None:
+        """``name`` labels the action for the Linux portal; Windows needs none."""
         hotkey_id = len(self._pending) + 1
         self._pending.append((hotkey_id, combo, action))
 

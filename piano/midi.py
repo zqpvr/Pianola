@@ -116,7 +116,8 @@ def _parse_track(data: bytes) -> tuple[list[tuple[int, int, tuple]], str]:
             payload = r.take(r.vlq())
             if meta_type == 0x51 and len(payload) == 3:  # set tempo
                 usec = (payload[0] << 16) | (payload[1] << 8) | payload[2]
-                events.append((tick, order, ("tempo", usec)))
+                if usec:                                 # zero would divide by zero later
+                    events.append((tick, order, ("tempo", usec)))
             elif meta_type == 0x03 and not name:         # track name
                 name = payload.decode("latin-1", "replace").strip()
             elif meta_type == 0x2F:                      # end of track
@@ -193,6 +194,8 @@ def read_midi(path: str) -> MidiSong:
         chunk = _read_chunk(fh)
         if not chunk or chunk[0] != b"MThd":
             raise MidiError("not a Standard MIDI File (missing MThd header)")
+        if len(chunk[1]) < 6:
+            raise MidiError("truncated MThd header")
         _fmt, ntracks, division = struct.unpack(">HHh", chunk[1][:6])
 
         raw_tracks: list[bytes] = []

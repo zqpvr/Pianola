@@ -139,7 +139,10 @@ class Keyboard:
             # Both shifts, unconditionally: cheap insurance against a stuck modifier.
             batch.append((VK_LSHIFT, False))
             batch.append((VK_RSHIFT, False))
-            self._send(batch)
+            try:
+                self._send(batch)
+            except OSError as exc:  # stop and panic must never be what fails
+                log.warning("could not release keys: %s", exc)
 
     @property
     def held(self) -> set[str]:
