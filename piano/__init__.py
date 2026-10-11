@@ -8,7 +8,7 @@ from .midi import MidiSong, Note, read_midi
 from .player import Player
 from .sheet import parse_sheet, read_sheet_file, sheet_report, to_sheet
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "ArrangeConfig", "Arrangement", "arrange", "best_transpose",
