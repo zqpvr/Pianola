@@ -10,11 +10,13 @@ possible without rebuilding the arrangement.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
 
 from .arrange import Arrangement
+from .config import DEFAULT_WINDOW
 from .keyboard import Keyboard, TimerResolution, foreground_title
 
 IDLE = "idle"
@@ -39,7 +41,7 @@ class Player:
         self.rate = 1.0
         self.loop = False
         self.countdown = 3.0
-        self.focus_filter: str | None = "Roblox"
+        self.focus_filter: str | None = DEFAULT_WINDOW
 
         self.on_state: Callable[[str], None] | None = None
         self.on_progress: Callable[[float, float], None] | None = None
@@ -49,6 +51,8 @@ class Player:
         self._pos = 0.0
         self._index = 0
         self._skip_countdown = False
+        self._counting = False
+        self._guard_noted = False
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._pause = threading.Event()
@@ -104,6 +108,9 @@ class Player:
             self._index = 0
         self._stop.clear()
         self._pause.clear()
+        self._spawn()
+
+    def _spawn(self) -> None:
         self._thread = threading.Thread(target=self._run, name="piano-player", daemon=True)
         self._thread.start()
 
@@ -116,7 +123,7 @@ class Player:
     def resume(self) -> None:
         if self.running and self._pause.is_set():
             self._pause.clear()
-            self._set_state(PLAYING)
+            self._set_state(COUNTDOWN if self._counting else PLAYING)
 
     def toggle(self) -> None:
         if not self.running:
@@ -179,6 +186,10 @@ class Player:
             return True
         title = foreground_title()
         if title is None:           # this session cannot report the focused window
+            if not self._guard_noted:
+                self._guard_noted = True
+                self._say("This desktop cannot report the focused window, "
+                          "so the window guard is off.")
             return True
         return self.focus_filter.lower() in title.lower()
 
@@ -198,17 +209,26 @@ class Player:
 
         with TimerResolution(1):
             if self.countdown > 0 and self._pos <= 0 and not self._skip_countdown:
-                self._set_state(COUNTDOWN)
+                self._counting = True
+                self._set_state(PAUSED if self._pause.is_set() else COUNTDOWN)
                 end = time.perf_counter() + self.countdown
                 while not self._stop.is_set():
+                    if self._pause.is_set():          # a paused countdown waits too
+                        paused_at = time.perf_counter()
+                        time.sleep(0.05)
+                        end += time.perf_counter() - paused_at
+                        continue
                     left = end - time.perf_counter()
                     if left <= 0:
                         break
-                    self._say(f"Starting in {left:.0f}...")
+                    self._say(f"Starting in {math.ceil(left)}...")
                     time.sleep(min(0.25, left))
+                self._counting = False
 
             self._skip_countdown = False
-            self._set_state(PLAYING)
+            if not self._stop.is_set():     # a stop during the countdown goes straight to idle
+                self._set_state(PAUSED if self._pause.is_set() else PLAYING)
+            send_error: OSError | None = None
             last = time.perf_counter()
             last_report = 0.0
             bursts, late, worst = 0, 0, 0.0
@@ -227,7 +247,10 @@ class Player:
                         self.keyboard.release_all()
                         released_for_wait = True
                         self._set_state(WAITING)
-                        self._say(f"Waiting for a window matching '{self.focus_filter}'.")
+                        # Naming what does have focus makes a wrong filter obvious.
+                        focused = foreground_title()
+                        self._say(f"Waiting for a window matching '{self.focus_filter}'"
+                                  + (f" (focused: '{focused}')." if focused else "."))
                     time.sleep(0.05)
                     last = time.perf_counter()
                     continue
@@ -243,7 +266,13 @@ class Player:
                     fired = False
                     while index < len(instants) and instants[index].t <= pos:
                         instant = instants[index]
-                        self.keyboard.press_batch(instant.downs, instant.ups)
+                        try:
+                            self.keyboard.press_batch(instant.downs, instant.ups)
+                        except OSError as exc:
+                            # Input refused, as when Windows locks or a UAC prompt
+                            # takes the desktop: stop rather than die mid-song.
+                            send_error = exc
+                            break
                         behind = (pos - instant.t) / max(self.rate, 0.01)
                         bursts += 1
                         late += behind > _LATE
@@ -251,6 +280,9 @@ class Player:
                         index += 1
                         fired = True
                     self._index = index
+
+                if send_error:
+                    break
 
                 if self.on_progress and (pos - last_report > 0.05 or fired):
                     last_report = pos
@@ -267,6 +299,13 @@ class Player:
                      bursts, worst * 1000, late, _LATE * 1000)
             self.keyboard.release_all()
 
+        if send_error:
+            log.error("sending keys failed: %s", send_error)
+            self._thread = None
+            self._set_state(IDLE)
+            self._say(f"Could not send keys ({send_error.strerror or send_error}); stopped.")
+            return
+
         if self._stop.is_set():
             self._set_state(IDLE)
             return
@@ -274,10 +313,9 @@ class Player:
         if self.loop:
             self._pos = 0.0
             self._index = 0
-            self._thread = None
             self._skip_countdown = True
             self._say("Looping.")
-            self.play(from_start=True)
+            self._spawn()           # not play(): that would clear a stop requested meanwhile
             return
 
         self._thread = None
