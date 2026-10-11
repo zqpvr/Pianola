@@ -1,109 +1,74 @@
 # Pianola
 
-Plays MIDI files and Virtual Piano sheets on the 61-key pianos in Roblox.
+Plays MIDI files and Virtual Piano sheets on the 61-key pianos in Roblox, and on
+[virtualpiano.net](https://virtualpiano.net/).
 
-It reads Standard MIDI files or plain-text Virtual Piano sheets and performs them
-on the keyboard, for the pianos across Roblox (Got Talent, Piano Sheets, the
-free-play games) and for [virtualpiano.net](https://virtualpiano.net/) itself.
-The name comes from the self-playing pianos of the 1900s, which read a
-perforated paper roll and worked the keys themselves.
+A MIDI file is almost never playable as written: it spans more octaves than the
+game has, stacks more voices than it wants, and repeats notes faster than a key
+can register. Pianola arranges the song to fit the keyboard first, then plays it.
 
-Sending the keystrokes is the easy half, about a dozen lines of `ctypes`. The
-hard half is that a MIDI file is almost never playable as written. A piano roll
-routinely spans seven octaves where the game offers five, stacks ten voices where
-it wants a handful, and retriggers notes faster than a keyboard event can
-round-trip through Windows. Most auto players blast the raw note stream at the
-game and produce something that is recognisably the wrong song. This one arranges
-first.
-
-Pure Python, no third-party packages. Download a single-file build for Windows
-or Linux from [Releases](https://github.com/zqpvr/Pianola/releases), or run from
-source: `python main.py` (`./run.sh` on Linux) is the whole installation.
+Pure Python, no third-party packages.
 
 ## Features
 
-- Transposition chosen by scoring every shift on how much of the song lands in
-  range, weighted by duration rather than note count.
-- Chord thinning that keeps the melody and the root, and prefers pitch classes
-  nothing else in the chord covers.
-- Detects notes that share a physical key, which are unplayable together no
-  matter what the MIDI says.
-- Reads and writes Virtual Piano letter notation, with per-character timing.
-- Converts a loaded MIDI back out as a sheet.
-- Humanisation on by default: chords roll from the bottom, onsets scatter a few
-  milliseconds.
-- Events land within about a millisecond of where they belong.
-- Only types into a window whose title matches, so alt-tabbing away pauses
-  rather than typing a solo into something else.
+- Picks the transposition that keeps the most of the song in range.
+- Thins chords to what the keyboard can hold, keeping the melody and the root.
+- Reads and writes Virtual Piano letter sheets, including pasted ones.
+- Humanised by default: chords roll slightly and onsets scatter a few ms.
+- Keystrokes land within about a millisecond of where they belong.
+- Only types into the game window, so alt-tabbing away pauses it.
 
-## Requirements
+## Windows
 
-Windows or Linux. The release builds carry their own Python; from source you
-need Python 3.10 or newer with Tk. Nothing else is needed: the MIDI parser, the
-arranger, the input backends and the scheduler are all in this repository.
+Download `Pianola-windows-x64.exe` from
+[Releases](https://github.com/zqpvr/Pianola/releases) and run it. Nothing to
+install.
 
-Run Roblox unelevated, or Windows silently discards input from an unelevated
-sender.
+- Run Roblox normally, not as administrator, or Windows drops the keystrokes.
+- If SmartScreen warns about an unknown publisher, choose **More info > Run anyway**.
 
-Linux needs a little setup, see [Linux](#linux).
-
-The layout assumes a US keyboard, deliberately, because sheets describe physical
-key positions rather than characters.
+From source: Python 3.10 or newer, then `python main.py`.
 
 ## Linux
 
-Run the release binary (`chmod +x pianola-linux-x86_64` first), or `./run.sh`
-from source; both take the same arguments as `python main.py`. The Roblox client on Linux is
+Download `pianola-linux-x86_64` from
+[Releases](https://github.com/zqpvr/Pianola/releases), then
+`chmod +x pianola-linux-x86_64` and run it. It works on any x86-64 distribution
+with glibc 2.35 or newer, on X11 and Wayland. The Roblox client on Linux is
 [Sober](https://sober.vinegarhq.org/), so the window box defaults to **Sober**.
 
-Keystrokes are typed through `/dev/uinput`, a virtual keyboard created at the
-kernel level, so it works the same on X11 and Wayland and reaches Sober, Wine
-and browsers alike. Your user has to be able to write to it:
-
-- Most distros: `sudo modprobe uinput`, then a udev rule such as
-  `KERNEL=="uinput", GROUP="input", MODE="0660"` and add yourself to `input`.
-
-**Hotkeys** come from the first of these the session allows:
-
-| Source | Where | Notes |
-| --- | --- | --- |
-| The keyboards themselves | Anywhere | Needs the `input` group. Observes, so the game sees the F-keys too |
-| The desktop's shortcut portal | KDE Plasma, GNOME 48+, Hyprland on Wayland | The desktop asks once to approve. On Hyprland, bind them with the `global` dispatcher; `hyprctl globalshortcuts` lists their names |
-| An X11 key grab | Any X11 window manager | On Wayland it only catches keys while an XWayland window has focus |
-
-For the portal, Pianola writes a hidden desktop entry,
-`~/.local/share/applications/io.github.zqpvr.Pianola.desktop`, so the desktop
-files the shortcuts under Pianola rather than under whatever launched it.
-
-Anything else, Sway and the other wlroots compositors included, can bind keys in
-its own config to `pianola --control ACTION`, which reaches the running player
-whichever source is in use. The actions are `play_pause`, `stop`, `restart`,
-`panic`, `speed_down` and `speed_up`:
-
-```
-bindsym F1 exec /path/to/pianola --control play_pause
-```
-
-**The window guard** asks the desktop which window has focus: a small KWin script
-on KDE Plasma, the IPC socket on Hyprland, Sway and niri, and the window manager's
-EWMH properties on any X11 session. GNOME on Wayland, and compositors without an
-IPC, offer no way to ask, so there the guard is off and keys go to whatever has
-focus; start playback with the right window in front. Where it works, a failed
-check pauses rather than plays.
-
-## Running it
+One-time setup: Pianola types through `/dev/uinput`, a virtual keyboard, which
+your user needs write access to. On most distributions:
 
 ```bash
-python main.py
+echo uinput | sudo tee /etc/modules-load.d/uinput.conf && sudo modprobe uinput
+echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/99-uinput.rules
+sudo usermod -aG input $USER     # then log out and back in
 ```
 
-The playlist picks up anything in the `songs` folder. The right-hand column
-exposes the arranger (transposition, polyphony, chord window, timing floors,
-humanisation) and re-arranges as you change it, with a summary line reporting
-how much of the song survived. The strip along the bottom is a live 61-key
-keyboard showing what is held and which character each key is.
+From source: Python 3.10 or newer with Tk (`python3-tk` on Debian and Ubuntu,
+`python3-tkinter` on Fedora), then `./run.sh`.
 
-Hotkeys work while Roblox has focus:
+**Hotkeys** work while Sober has focus on KDE Plasma, GNOME 48+, Hyprland and any
+X11 desktop; KDE and GNOME ask once to approve them. Elsewhere, such as Sway, bind
+keys in your compositor's config to `pianola --control ACTION`:
+
+```
+bindsym F1 exec /path/to/pianola-linux-x86_64 --control play_pause
+```
+
+The actions are `play_pause`, `stop`, `restart`, `panic`, `speed_down` and
+`speed_up`. Being in the `input` group also makes hotkeys work everywhere.
+
+**The window guard** (pause when Sober loses focus) works on KDE Plasma,
+Hyprland, Sway, niri and any X11 desktop. GNOME on Wayland gives no way to ask
+which window has focus, so there it is off: keep Sober in front while it plays.
+
+## Using it
+
+Add songs (or drop them in a `songs` folder next to the app), pick one, click into
+the game, and press F1. The panel on the right tunes the arrangement and shows how
+much of the song survived it.
 
 | Key | Does |
 | --- | --- |
@@ -111,164 +76,38 @@ Hotkeys work while Roblox has focus:
 | F2 | Stop |
 | F3 | Restart |
 | F4 | Release every held key |
-| F5 / F6 | Nudge speed by five percent |
+| F5 / F6 | Speed down / up by 5% |
 
-F4 is worth remembering. A stuck modifier is the failure mode that turns a
-browser into a mess of keyboard shortcuts, so it releases both shifts
-unconditionally alongside anything the player is holding.
+For virtualpiano.net, set the window box to **Virtual Piano** and click the
+on-screen piano once.
 
-The CLI covers the same ground:
-
-```bash
-python main.py song.mid --speed 1.1 --polyphony 5 --humanize 0.3
-```
-
-`--analyze` reports the song's range, what each transposition strategy would
-achieve, and what the arranger did, without playing. `--preview` prints the
-keystroke stream with timestamps, which is the fastest way to see whether a file
-arranged sensibly. `--keys` prints the layout. `--no-window-check` removes the
-focus guard, and `--loop` repeats. `--log` records what the player does
-(keystroke batches, focus changes, hotkeys, state, timing) to the terminal and to
-`pianola.log`, which is the thing to attach when something misbehaves.
-`--control ACTION` drives a running player on Linux, as above.
-
-## What the arranger does
-
-Transposition scores every candidate shift on the fraction of the song landing
-inside the playable C2 to C7 window, weighted by note duration rather than count,
-so a flurry of grace notes cannot outvote the sustained melody a listener
-actually hears. Whole octaves are tried first and win by default, since moving a
-piece bodily keeps it in its original key. A semitone shift buys a sliver of
-range in exchange for changing key, so it is only considered under `--any-key`
-and only when the gain is decisive. Whatever still falls off the ends is folded
-back in by octaves rather than dropped, which keeps a bass line audible.
-
-Chords are grouped from onsets within a tolerance window and thinned to the
-polyphony limit. Which notes survive is decided rather than arbitrary: the top
-note stays because it carries the melody and the bottom because it carries the
-root, and the rest are ranked by velocity with a bonus for contributing a pitch
-class nothing else covers. A doubled octave adds far less than the third that
-tells you whether the chord is major or minor.
-
-Two constraints come from the keyboard rather than the music:
-
-| Constraint | Handling |
-| --- | --- |
-| A repeated note needs a release and a press far enough apart to register as two events | The previous note is clipped short to open a gap, or the two are tied into one longer press if clipping would leave nothing audible |
-| Every accidental shares a physical key with the natural below it, `T` being shift plus the same key as `t` | Collisions are detected and resolved, rather than emitting a sequence that leaves shift in the wrong state |
-
-A chord containing both C and C sharp is unplayable on real hardware whatever the
-MIDI says. That second constraint is the one most auto players get wrong.
-
-## Letters
-
-Alongside MIDI the player reads and writes the letter notation used by
-virtualpiano.net, which is also what nearly every Roblox piano sheet uses,
-because nearly every Roblox piano sheet was copied from there. The semantics are
-per-character rather than per-word, which is the part that is easy to get wrong.
-
-| Token | Advances the clock by |
-| --- | --- |
-| A note | One slot |
-| Space, or a single line break | One more |
-| Pipe | Two |
-| Blank line | An extended pause |
-| `[...]` | Nothing, played together |
-| `[ ... ]` with spaces | Rolled quickly, the site's "as fast as possible" |
-
-Capitals are the black keys. The site's documented ordering of `as|df` shorter
-than `as| df` shorter than `as | df` shorter than `as| |df` falls out of that
-arithmetic instead of needing to be special-cased.
-
-The model was checked against the
-[Overworld Theme sheet](https://virtualpiano.net/music-sheet/overworld-theme-super-mario-bros/)
-rather than assumed. It places the high G on slot 8, the low G on slot 12 and the
-third bar on slot 16, which is the tune's actual rhythm, and the full sheet comes
-out at very nearly the 1:58 the site lists. Pasting it gives 128 notes, no
-unrecognised characters, and nothing dropped in arrangement.
-
-Whitespace at both ends of every line is stripped first. Under per-character
-timing the invisible indentation that comes with copying out of a web page or a
-chat message would otherwise stretch every rest in the piece.
-
-Tempo is two numbers: beats per minute, and how many slots fill a beat. Two slots
-per beat, making a slot an eighth note, is what sheets on the site assume and is
-the default. `songs/demo.txt` demonstrates every symbol.
-
-Sheets arrive by clipboard from a forum post rather than as a tidy file, so the
-**Letters** button opens an editor that treats pasted text as a first-class
-source. It reports how many notes it found, roughly how long the result runs, and
-which characters it ignored. That last part matters, because stray punctuation,
-smart quotes and stretches of lyrics are common in pasted sheets, and a silent
-skip makes a mangled paste look like a working one. It does not read the
-clipboard until you press Paste, since every letter of the alphabet is a valid
-piano key and any old clipboard text would otherwise parse as music.
-
-The same window converts the other way. **From loaded song** writes whatever MIDI
-you have loaded out as letters, respecting the transposition and polyphony limit
-you have set. Onsets are quantised onto the slot grid and gaps are spelled with
-the same pipes and spaces, so parsing the output back at the same tempo
-reproduces the timing.
+The same works from a terminal, where `pianola` is the downloaded file (or
+`python main.py` from source):
 
 ```bash
-python main.py song.mid --to-sheet > song.txt
+pianola song.mid --speed 1.1 --polyphony 5
+pianola song.mid --analyze       # what the arranger would do, without playing
+pianola song.mid --preview       # the keystrokes, with timestamps
+pianola song.mid --to-sheet      # the song as Virtual Piano letters
+pianola --log                    # write pianola.log, for bug reports
 ```
 
-## Timing
+## Letter sheets
 
-The default Windows scheduler granularity is around 15 ms, enough to smear a
-chord audibly. The player raises the timer resolution to 1 ms for the duration of
-playback, and the scheduling loop sleeps until a note is nearly due before
-spinning out the last two and a half milliseconds.
-
-The clock is virtual rather than wall-clock, so speed changes, pausing, seeking
-and the focus guard all work mid-song without rebuilding anything. Keystrokes
-destined for the same instant are fused into one `SendInput` call, with naturals
-pressed before accidentals so shift toggles at most once per chord.
+The **Letters** button opens an editor for sheets pasted from virtualpiano.net or
+a forum post. It reports how many notes it found and which characters it ignored,
+and can also write the loaded MIDI out as letters. Timing is per character: a
+note or space is one slot, `|` is two, a blank line is a longer pause, `[...]` is
+a chord, and `[ ... ]` with spaces is a quick roll. Capitals are the black keys.
+`songs/demo.txt` shows every symbol.
 
 ## Notes
 
-Keys are delivered as scancodes through `SendInput` on Windows and as a virtual
-keyboard on Linux, the same path a physical keyboard takes. Nothing is injected into or read from the game. This is a program
-that types, and it can only do what your fingers could do more slowly.
-
-Sticky Keys will not trigger from the shift traffic, since that shortcut needs
-five consecutive shift presses with nothing in between, and there is always a
-note key between ours.
-
-Playing virtualpiano.net needs nothing special: the site uses the identical
-layout and listens to the ordinary browser keyboard stream. Switch the window box
-to the **Virtual Piano** preset, then click the on-screen piano once so the page
-has focus. The box is free text, so any other title fragment works for any other
-target.
-
-Settings persist to `settings.json` when the window closes, next to the
-application if that folder is writable, so a copy on a USB stick stays
-self-contained, and otherwise in `%APPDATA%\Pianola` or `~/.config/pianola`.
-Sheets saved from the Letters window and `pianola.log` go to the same place.
-
-## Layout
-
-```
-main.py           entry point
-gui.py            the window, the arranger controls, the live keyboard
-cli.py            the command line
-piano/
-  midi.py         Standard MIDI parsing
-  sheet.py        Virtual Piano letter notation, both directions
-  arrange.py      transposition, chord thinning, keyboard constraints
-  keymap.py       the 61-key layout
-  keyboard.py     key bookkeeping and shift handling
-  player.py       the scheduler and the virtual clock
-  hotkeys.py      the transport keys
-  config.py       settings.json
-  _win.py         SendInput, RegisterHotKey, window title, timer (Windows)
-  _linux.py       uinput, the focused window per desktop (Linux)
-  _linux_hotkeys.py  evdev, the shortcut portal, X11 grabs, --control (Linux)
-  _dbus.py        a small D-Bus client, for the portal and KWin
-  _x11.py         a small X11 protocol client, for EWMH and key grabs
-tests/            smoke tests, run by CI on Windows and Linux
-```
+- Keys are sent the way a physical keyboard sends them. Nothing reads or modifies
+  the game.
+- Sheets use US keyboard positions, so the layout assumes a US keyboard.
+- Settings, the log and saved sheets live next to the app, or in
+  `%APPDATA%\Pianola` or `~/.config/pianola` if that folder isn't writable.
 
 ## Licence
 
