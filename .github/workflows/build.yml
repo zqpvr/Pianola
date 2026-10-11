@@ -61,10 +61,18 @@ jobs:
         run: |
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install pyinstaller==6.22.3
-          /tmp/venv/bin/pyinstaller --onefile --clean --noconfirm --name pianola-linux-x86_64 main.py
+          # PyInstaller leaves libxcb to the system, for the sake of OpenGL stacks,
+          # but minimal installs and some distributions lack it. Tk draws without GL,
+          # so carrying it and its own dependencies is safe.
+          libs=/usr/lib/x86_64-linux-gnu
+          /tmp/venv/bin/pyinstaller --onefile --clean --noconfirm --name pianola-linux-x86_64 \
+            --add-binary "$libs/libxcb.so.1:." --add-binary "$libs/libXau.so.6:." \
+            --add-binary "$libs/libXdmcp.so.6:." --add-binary "$libs/libbsd.so.0:." \
+            --add-binary "$libs/libmd.so.0:." main.py
       - name: Smoke-test the binary
         run: |
           bin=dist/pianola-linux-x86_64
+          /tmp/venv/bin/pyi-archive_viewer --list --brief $bin | grep -q 'libxcb\.so\.1'
           $bin --version
           $bin --keys
           $bin songs/demo.txt --analyze
