@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
+import platform
 import sys
+import threading
 import time
 
 from piano import keymap
 from piano.arrange import ArrangeConfig, arrange, best_transpose, score_transpose
+from piano.config import app_dir
 from piano.hotkeys import HotkeyManager
-from piano.keyboard import Keyboard
+from piano.keyboard import Keyboard, describe
 from piano.midi import MidiError, read_midi
 from piano.player import Player
 from piano.sheet import read_sheet_file, to_sheet
@@ -62,6 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-bpm", type=float, default=0.0,
                    help="tempo to write letters at (default: the song's own)")
     p.add_argument("--keys", action="store_true", help="print the key map and exit")
+    p.add_argument("--log", action="store_true",
+                   help="log what the player does, to the terminal and pianola.log")
     return p
 
 
@@ -125,8 +131,27 @@ def preview(arrangement, limit: int = 60) -> None:
             break
 
 
+def setup_logging() -> None:
+    """Debug log to stderr and to pianola.log beside the app, crashes included."""
+    path = os.path.join(app_dir(), "pianola.log")
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s.%(msecs)03d %(threadName)-13s %(name)-14s %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stderr),
+                  logging.FileHandler(path, mode="w", encoding="utf-8")])
+    log = logging.getLogger("pianola")
+    threading.excepthook = lambda a: log.error(
+        "thread %s crashed", a.thread.name if a.thread else "?",
+        exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
+    log.info("logging to %s", path)
+    log.info("Python %s on %s; %s", platform.python_version(), platform.platform(), describe())
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.log:
+        setup_logging()
 
     if args.keys:
         print_keys()
@@ -189,6 +214,9 @@ def main(argv: list[str] | None = None) -> int:
     hotkeys.bind("f2", player.stop)
     hotkeys.bind("f4", player.panic)
     hotkeys.start()
+    if hotkeys.failed:
+        why = getattr(hotkeys, "reason", "") or "already taken by another app"
+        print(f"hotkeys unavailable ({why}); Ctrl+C still quits", file=sys.stderr)
 
     print(f"{song.title}  -  {arrangement.summary()}")
     print("F1 play/pause   F2 stop   F4 release keys   Ctrl+C quit")

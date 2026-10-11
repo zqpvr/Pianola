@@ -9,6 +9,7 @@ possible without rebuilding the arrangement.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -25,6 +26,9 @@ FINISHED = "finished"
 
 _SPIN_THRESHOLD = 0.0025     # spin out the final 2.5 ms for sub-ms accuracy
 _MAX_NAP = 0.005             # never sleep so long that a stop request lags
+_LATE = 0.005                # a burst this far behind its slot counts as late in the log
+
+log = logging.getLogger(__name__)
 
 
 class Player:
@@ -69,11 +73,13 @@ class Player:
 
     def _set_state(self, state: str) -> None:
         if state != self._state:
+            log.info("state %s -> %s", self._state, state)
             self._state = state
             if self.on_state:
                 self.on_state(state)
 
     def _say(self, text: str) -> None:
+        log.info("%s", text)
         if self.on_message:
             self.on_message(text)
 
@@ -171,13 +177,24 @@ class Player:
     def _focus_ok(self) -> bool:
         if not self.focus_filter:
             return True
-        return self.focus_filter.lower() in foreground_title().lower()
+        title = foreground_title()
+        if title is None:           # this session cannot report the focused window
+            return True
+        return self.focus_filter.lower() in title.lower()
 
     def _run(self) -> None:
         arrangement = self.arrangement
         assert arrangement is not None
         instants = arrangement.instants
         released_for_wait = False
+
+        try:
+            self.keyboard.prepare()
+        except RuntimeError as exc:
+            self._say(str(exc))
+            self._thread = None
+            self._set_state(IDLE)
+            return
 
         with TimerResolution(1):
             if self.countdown > 0 and self._pos <= 0 and not self._skip_countdown:
@@ -194,6 +211,7 @@ class Player:
             self._set_state(PLAYING)
             last = time.perf_counter()
             last_report = 0.0
+            bursts, late, worst = 0, 0, 0.0
 
             while not self._stop.is_set():
                 now = time.perf_counter()
@@ -226,6 +244,10 @@ class Player:
                     while index < len(instants) and instants[index].t <= pos:
                         instant = instants[index]
                         self.keyboard.press_batch(instant.downs, instant.ups)
+                        behind = (pos - instant.t) / max(self.rate, 0.01)
+                        bursts += 1
+                        late += behind > _LATE
+                        worst = max(worst, behind)
                         index += 1
                         fired = True
                     self._index = index
@@ -241,6 +263,8 @@ class Player:
                 if wait > 0:
                     self._sleep_until(time.perf_counter() + wait)
 
+            log.info("timing: %d bursts, worst %.1f ms behind, %d over %.0f ms",
+                     bursts, worst * 1000, late, _LATE * 1000)
             self.keyboard.release_all()
 
         if self._stop.is_set():

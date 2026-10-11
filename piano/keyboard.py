@@ -1,63 +1,32 @@
-"""Keystroke delivery via ``SendInput``.
+"""Keystroke delivery: the key bookkeeping, over a per-platform sender.
 
-Roblox listens to the normal Windows keyboard stream, so scancode-level
-``SendInput`` events are indistinguishable from a real key press.  The layer
-also owns the shift state: accidentals live on shifted keys, and a natural sent
-while shift happens to be down produces the wrong note, so shift is raised and
-lowered around each burst rather than left to chance.
+Roblox listens to the normal keyboard stream, so scancode-level events are
+indistinguishable from a real key press.  The layer also owns the shift state:
+accidentals live on shifted keys, and a natural sent while shift happens to be
+down produces the wrong note, so shift is raised and lowered around each burst
+rather than left to chance.
+
+Keys are identified by Windows virtual-key code throughout; the Linux backend
+translates them to evdev codes at the edge.
 """
 
 from __future__ import annotations
 
-import ctypes
+import logging
+import sys
 import threading
-from ctypes import wintypes
 
-INPUT_KEYBOARD = 1
-KEYEVENTF_KEYUP = 0x0002
-KEYEVENTF_SCANCODE = 0x0008
-MAPVK_VK_TO_VSC = 0
+if sys.platform == "win32":
+    from ._win import TimerResolution, describe, foreground_title, send_keys
+    from ._win import prepare as _prepare
+else:
+    from ._linux import TimerResolution, describe, foreground_title, send_keys
+    from ._linux import prepare as _prepare
+
+log = logging.getLogger(__name__)
 
 VK_LSHIFT = 0xA0
 VK_RSHIFT = 0xA1
-
-_user32 = ctypes.WinDLL("user32", use_last_error=True)
-_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-
-class _KEYBDINPUT(ctypes.Structure):
-    _fields_ = [("wVk", wintypes.WORD),
-                ("wScan", wintypes.WORD),
-                ("dwFlags", wintypes.DWORD),
-                ("time", wintypes.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-
-
-class _MOUSEINPUT(ctypes.Structure):
-    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
-                ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
-                ("time", wintypes.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-
-
-class _HARDWAREINPUT(ctypes.Structure):
-    _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD),
-                ("wParamH", wintypes.WORD)]
-
-
-class _INPUTUNION(ctypes.Union):
-    _fields_ = [("ki", _KEYBDINPUT), ("mi", _MOUSEINPUT), ("hi", _HARDWAREINPUT)]
-
-
-class INPUT(ctypes.Structure):
-    _anonymous_ = ("u",)
-    _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
-
-
-_user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
-_user32.SendInput.restype = wintypes.UINT
-_user32.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
-_user32.MapVirtualKeyW.restype = wintypes.UINT
 
 
 # Explicit US-layout table.  Virtual Piano sheets describe physical key
@@ -72,8 +41,12 @@ for _shifted, _base in zip(")!@#$%^&*(", "0123456789"):
     _CHAR_VK[_shifted] = (0x30 + int(_base), True)
 
 
-def scancode(vk: int) -> int:
-    return _user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
+def _key_name(vk: int) -> str:
+    if vk == VK_LSHIFT:
+        return "Shift"
+    if vk == VK_RSHIFT:
+        return "RShift"
+    return chr(vk).lower()
 
 
 def needs_shift(char: str) -> bool:
@@ -97,6 +70,11 @@ class Keyboard:
         self._shift_down = False
         self._lock = threading.Lock()
 
+    def prepare(self) -> None:
+        """Do any slow one-off setup now, so the first note is not late."""
+        if not self.dry_run:
+            _prepare()
+
     # -- raw ---------------------------------------------------------------
     def _send(self, items: list[tuple[int, bool]]) -> None:
         """items: list of (virtual key, is_key_down)."""
@@ -105,15 +83,10 @@ class Keyboard:
         if self.dry_run:
             self.raw_log.append(list(items))
             return
-        buf = (INPUT * len(items))()
-        for i, (vk, down) in enumerate(items):
-            flags = KEYEVENTF_SCANCODE | (0 if down else KEYEVENTF_KEYUP)
-            buf[i].type = INPUT_KEYBOARD
-            buf[i].ki = _KEYBDINPUT(wVk=0, wScan=scancode(vk), dwFlags=flags,
-                                    time=0, dwExtraInfo=None)
-        sent = _user32.SendInput(len(items), buf, ctypes.sizeof(INPUT))
-        if sent != len(items):
-            raise ctypes.WinError(ctypes.get_last_error())
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("keys %s", " ".join(("+" if down else "-") + _key_name(vk)
+                                         for vk, down in items))
+        send_keys(items)
 
     def _set_shift(self, want: bool, batch: list[tuple[int, bool]]) -> None:
         if want != self._shift_down:
@@ -171,44 +144,3 @@ class Keyboard:
     @property
     def held(self) -> set[str]:
         return set(self._held)
-
-
-# --------------------------------------------------------------------------
-# window focus + timer resolution
-# --------------------------------------------------------------------------
-
-_user32.GetForegroundWindow.restype = wintypes.HWND
-_user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
-
-
-def foreground_title() -> str:
-    hwnd = _user32.GetForegroundWindow()
-    if not hwnd:
-        return ""
-    buf = ctypes.create_unicode_buffer(512)
-    _user32.GetWindowTextW(hwnd, buf, 512)
-    return buf.value
-
-
-class TimerResolution:
-    """1 ms scheduler granularity for the duration of playback."""
-
-    def __init__(self, period: int = 1):
-        self.period = period
-        self._active = False
-
-    def __enter__(self):
-        try:
-            _kernel32.LoadLibraryW("winmm.dll")
-            self._winmm = ctypes.WinDLL("winmm")
-            if self._winmm.timeBeginPeriod(self.period) == 0:
-                self._active = True
-        except OSError:
-            pass
-        return self
-
-    def __exit__(self, *exc):
-        if self._active:
-            self._winmm.timeEndPeriod(self.period)
-            self._active = False
-        return False

@@ -6,9 +6,10 @@ touches a widget is bounced back through ``root.after``.
 
 from __future__ import annotations
 
-import ctypes
+import logging
 import os
 import queue
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -21,8 +22,9 @@ from piano.midi import MidiError, MidiSong, read_midi
 from piano.player import FINISHED, PLAYING, Player
 from piano.sheet import parse_sheet, read_sheet_file, sheet_report, to_sheet
 
-MIDI_TYPES = [("MIDI files", "*.mid *.midi"), ("All files", "*.*")]
-SHEET_TYPES = [("Sheet text", "*.txt"), ("All files", "*.*")]
+# Upper-case patterns too: Tk's dialog matches case-sensitively off Windows.
+MIDI_TYPES = [("MIDI files", "*.mid *.midi *.MID *.MIDI"), ("All files", "*.*")]
+SHEET_TYPES = [("Sheet text", "*.txt *.TXT"), ("All files", "*.*")]
 
 BG = "#1e1f26"
 PANEL = "#282a36"
@@ -30,6 +32,22 @@ FG = "#e6e6ec"
 MUTED = "#9a9ab0"
 ACCENT = "#7c9cff"
 LIT = "#ff9d5c"
+
+
+# Segoe UI and Consolas ship with Windows.  Elsewhere Tk hands the family to
+# fontconfig, whose generic names resolve to the desktop's own fonts.
+if sys.platform == "win32":
+    def sans(size: int, bold: bool = False) -> tuple:
+        return ("Segoe UI Semibold" if bold else "Segoe UI", size)
+
+    def mono(size: int) -> tuple:
+        return ("Consolas", size)
+else:
+    def sans(size: int, bold: bool = False) -> tuple:
+        return ("sans-serif", size, "bold") if bold else ("sans-serif", size)
+
+    def mono(size: int) -> tuple:
+        return ("monospace", size)
 
 
 class SheetWindow(tk.Toplevel):
@@ -70,7 +88,7 @@ class SheetWindow(tk.Toplevel):
         body.rowconfigure(0, weight=1)
         body.columnconfigure(0, weight=1)
         self.text = tk.Text(body, bg=PANEL, fg=FG, insertbackground=FG, wrap="word",
-                            borderwidth=0, highlightthickness=0, font=("Consolas", 11),
+                            borderwidth=0, highlightthickness=0, font=mono(11),
                             padx=app.px(8), pady=app.px(8))
         self.text.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(body, command=self.text.yview)
@@ -200,7 +218,7 @@ class SheetWindow(tk.Toplevel):
             messagebox.showerror("Could not save", str(exc))
             return
         self.app._add([path])
-        self.report_var.set(f"Saved to songs\\{os.path.basename(path)}")
+        self.report_var.set(f"Saved to {os.path.join('songs', os.path.basename(path))}")
 
     def close(self) -> None:
         if self._job:
@@ -215,12 +233,9 @@ def _display_scale(root: tk.Tk) -> float:
     Without this Tk draws at 96 DPI and Windows stretches the bitmap, which
     looks soft on the high-DPI screens most people game on.
     """
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)       # per-monitor
-    except (AttributeError, OSError):
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except (AttributeError, OSError):
+    if sys.platform == "win32":
+        from piano._win import enable_dpi_awareness
+        if not enable_dpi_awareness():
             return 1.0
     try:
         dpi = root.winfo_fpixels("1i")
@@ -293,14 +308,14 @@ class App:
         style.configure("TLabel", background=BG, foreground=FG)
         style.configure("Muted.TLabel", background=BG, foreground=MUTED)
         style.configure("Title.TLabel", background=BG, foreground=FG,
-                        font=("Segoe UI Semibold", 11))
+                        font=sans(11, bold=True))
         style.configure("Big.TLabel", background=BG, foreground=ACCENT,
-                        font=("Segoe UI Semibold", 13))
+                        font=sans(13, bold=True))
         style.configure("TButton", background="#343747", foreground=FG,
                         padding=(self.px(10), self.px(5)), borderwidth=0)
         style.map("TButton", background=[("active", "#41455a"), ("pressed", "#2c2f3d")])
         style.configure("Accent.TButton", background=ACCENT, foreground="#12131a",
-                        font=("Segoe UI Semibold", 10))
+                        font=sans(10, bold=True))
         style.map("Accent.TButton", background=[("active", "#93aeff")])
         style.configure("TCheckbutton", background=BG, foreground=FG)
         style.map("TCheckbutton", background=[("active", BG)])
@@ -341,7 +356,7 @@ class App:
 
         self.listbox = tk.Listbox(left, bg=PANEL, fg=FG, selectbackground=ACCENT,
                                   selectforeground="#12131a", highlightthickness=0,
-                                  borderwidth=0, activestyle="none", font=("Segoe UI", 10))
+                                  borderwidth=0, activestyle="none", font=sans(10))
         self.listbox.grid(row=1, column=0, sticky="nsew")
         self.listbox.bind("<<ListboxSelect>>", lambda e: self.load_selected())
         self.listbox.bind("<Double-Button-1>", lambda e: self.play())
@@ -371,7 +386,7 @@ class App:
 
         self.time_var = tk.StringVar(value="0:00 / 0:00")
         ttk.Label(transport, textvariable=self.time_var,
-                  font=("Consolas", 10)).grid(row=0, column=5)
+                  font=mono(10)).grid(row=0, column=5)
 
         # --- keyboard view ------------------------------------------------
         self.canvas = tk.Canvas(outer, height=self.px(86), bg=PANEL, highlightthickness=0)
@@ -689,8 +704,8 @@ class App:
                 self.hotkeys.bind(combo, lambda a=action: self.root.after(0, a))
         self.hotkeys.start()
         if self.hotkeys.failed:
-            self.messages.put("Hotkeys already taken by another app: "
-                              + ", ".join(self.hotkeys.failed))
+            why = getattr(self.hotkeys, "reason", "") or "already taken by another app"
+            self.messages.put(f"Hotkeys unavailable ({why}): " + ", ".join(self.hotkeys.failed))
 
     def _nudge_rate(self, delta: float) -> None:
         rate = min(3.0, max(0.25, float(self.vars["rate"].get()) + delta))
@@ -712,7 +727,7 @@ class App:
         step = width / len(whites)
         top = self.px(6)
         height = self.px(74)
-        font = ("Consolas", 7)
+        font = mono(7)
         white_index = {n: i for i, n in enumerate(whites)}
 
         for note in whites:
@@ -790,6 +805,8 @@ class App:
 
 def main() -> None:
     root = tk.Tk()
+    root.report_callback_exception = lambda *exc: logging.getLogger("gui").error(
+        "callback failed", exc_info=exc)
     App(root)
     root.mainloop()
 

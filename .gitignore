@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 settings.json
+pianola.log
 
 # Sheets saved from the Letters window stay local; most of them are
 # transcriptions of music somebody else owns.

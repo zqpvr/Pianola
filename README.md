@@ -16,7 +16,7 @@ round-trip through Windows. Most auto players blast the raw note stream at the
 game and produce something that is recognisably the wrong song. This one arranges
 first.
 
-Pure Python, no third-party packages. `python main.py` is the whole installation.
+Pure Python, no third-party packages. `python main.py` (`./run.sh` on Linux) is the whole installation.
 
 ## Features
 
@@ -36,14 +36,39 @@ Pure Python, no third-party packages. `python main.py` is the whole installation
 
 ## Requirements
 
-Windows, and Python 3.10 or newer. Nothing else is needed: the MIDI parser,
+Windows or Linux, and Python 3.10 or newer (with Tk for the window). Nothing else is needed: the MIDI parser,
 the arranger, the input backend and the scheduler are all in this repository.
 
 Run Roblox unelevated, or Windows silently discards input from an unelevated
 sender.
 
+Linux needs a little setup, see [Linux](#linux).
+
 The layout assumes a US keyboard, deliberately, because sheets describe physical
 key positions rather than characters.
+
+## Linux
+
+Run `./run.sh` instead of `python main.py`; it takes the same arguments.
+
+Keystrokes are typed through `/dev/uinput`, a virtual keyboard created at the
+kernel level, so it works the same on X11 and Wayland and reaches Wine, Proton
+and native Roblox clients alike. Your user has to be able to write to it:
+
+- Most distros: `sudo modprobe uinput`, then a udev rule such as
+  `KERNEL=="uinput", GROUP="input", MODE="0660"` and add yourself to `input`.
+
+Two things are best-effort and degrade rather than fail:
+
+- **Hotkeys** read `/dev/input/event*`, which needs the `input` group. Without it
+  the window buttons still work and the player says the hotkeys are unavailable.
+  They observe rather than grab, so the game also receives F1 and friends.
+- **The window guard** needs a way to ask the desktop for the focused window:
+  `hyprctl` on Hyprland, `swaymsg` on Sway, `kdotool` on KDE Plasma, or `xdotool`
+  on any X11 session. Without the one for your desktop the guard is off and keys
+  go to whatever has focus, so start playback with the right window in front.
+  With it, a failed check pauses rather than plays. Set the window box to match
+  your client's title (Sober's may not say "Roblox").
 
 ## Running it
 
@@ -77,7 +102,9 @@ The CLI covers the same ground:
 python main.py song.mid --speed 1.1 --polyphony 5 --humanize 0.3
 ```
 
-`--analyze` reports the song's range, what each transposition strategy would
+`--log` records what the player does (keystroke batches, focus changes, hotkeys,
+state, timing) to the terminal and to `pianola.log` beside the app, which is the
+thing to attach when something misbehaves. `--analyze` reports the song's range, what each transposition strategy would
 achieve, and what the arranger did, without playing. `--preview` prints the
 keystroke stream with timestamps, which is the fastest way to see whether a file
 arranged sensibly. `--keys` prints the layout. `--no-window-check` removes the
@@ -183,7 +210,7 @@ Keys are delivered as scancodes through `SendInput`, the same path a physical
 keyboard takes. Nothing is injected into or read from the game. This is a program
 that types, and it can only do what your fingers could do more slowly.
 
-Sticky Keys will not trigger from the shift traffic, since that shortcut needs
+Sticky Keys (Windows) will not trigger from the shift traffic, since that shortcut needs
 five consecutive shift presses with nothing in between, and there is always a
 note key between ours.
 
@@ -207,7 +234,9 @@ piano/
   sheet.py        Virtual Piano letter notation, both directions
   arrange.py      transposition, chord thinning, keyboard constraints
   keymap.py       the 61-key layout
-  keyboard.py     SendInput, scancodes, shift handling
+  keyboard.py     key bookkeeping and shift handling
+  _win.py         SendInput, RegisterHotKey, window title, timer (Windows)
+  _linux.py       uinput, evdev hotkeys, window title (Linux)
   player.py       the scheduler and the virtual clock
   hotkeys.py      the transport keys
   config.py       settings.json
