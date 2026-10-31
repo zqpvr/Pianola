@@ -21,7 +21,7 @@ Pure Python, no third-party packages.
 ## Windows
 
 Download `Pianola-windows-x64.exe` from
-[Releases](https://github.com/zqpvr/Pianola/releases) and run it. Nothing to
+[Releases](https://git.zqpvr.net/zqpvr01/Pianola/releases) and run it. Nothing to
 install.
 
 - Run Roblox normally, not as administrator, or Windows drops the keystrokes.
@@ -32,7 +32,7 @@ From source: Python 3.10 or newer, then `python main.py`.
 ## Linux
 
 Download `pianola-linux-x86_64` from
-[Releases](https://github.com/zqpvr/Pianola/releases), then
+[Releases](https://git.zqpvr.net/zqpvr01/Pianola/releases), then
 `chmod +x pianola-linux-x86_64` and run it. It works on any x86-64 distribution
 with glibc 2.35 or newer, on X11 and Wayland. The Roblox client on Linux is
 [Sober](https://sober.vinegarhq.org/), so the window box defaults to **Sober**.
