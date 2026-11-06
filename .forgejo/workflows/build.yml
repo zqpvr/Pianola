@@ -126,7 +126,7 @@ jobs:
       - name: Publish the release
         env:
           # The runner shares the server's network, so this talks to Forgejo directly instead of through the VPS.
-          API: http://127.0.0.1:3000/api/v1/repos/${{ github.repository }}
+          API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
           AUTH: "Authorization: token ${{ secrets.GITHUB_TOKEN }}"
         run: |
           id=$(jq -n --arg tag "$GITHUB_REF_NAME" --rawfile body notes.md '{tag_name: $tag, name: $tag, body: $body}' \
